@@ -34,7 +34,7 @@ Roughly seven-eighths of the variation remains unexplained by data available in 
 | File | Description |
 |---|---|
 | `Appendix_A_Analysis_Notebook.ipynb` | The full analysis with outputs and figures rendered inline. GitHub displays this directly—no download needed. |
-| `Appendix_B_analysis_pipeline.py` | The same analysis as a documented module, structured for reproducibility. |
+| `Appendix_B_Analysis_Pipeline.py` | The same analysis as a documented module, structured for reproducibility. |
 | `FAME_export.xlsx` | Raw extract from FAME (Bureau van Dijk), retrieved 11 September 2026. 564 companies. The `Search summary` sheet records the search criteria. |
 | `analytical_sample.csv` | Cleaned analytical sample of 337 companies, produced by the pipeline. |
 
@@ -44,7 +44,7 @@ Roughly seven-eighths of the variation remains unexplained by data available in 
 
 ```bash
 pip install pandas numpy scikit-learn xgboost shap statsmodels scipy matplotlib openpyxl
-python Appendix_B_analysis_pipeline.py
+python Appendix_B_Analysis_Pipeline.py
 ```
 
 `FAME_export.xlsx` must sit in the same directory. The script writes `analytical_sample.csv` and the four figures, and prints every table reported in Chapter 4.
