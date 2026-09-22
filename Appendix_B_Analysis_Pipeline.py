@@ -9,12 +9,12 @@ EP4DIS MSc Dissertation, September 2026
 ================================================================================
 
 PURPOSE
-    Reproduces every result, table and figure reported in Chapter 4 from the
-    raw FAME export.
+    Reproduces every result, table and figure reported in Chapters 3 and 4 from
+    the two FAME exports below.
 
 INPUT
     FAME_export.xlsx    Companies House financial data via FAME (Bureau van
-                        Dijk), its Search summary sheet records the data update. Search criteria:
+                        Dijk); its Search summary sheet records the data update. Search criteria:
                           1. Active companies, not in receivership or dormant
                           2. England, Scotland, Wales or Northern Ireland
                           3. Turnover >= GBP 10.2m, 2022
@@ -24,11 +24,16 @@ INPUT
                         Returns 564 companies. Columns extracted: turnover,
                         EBITDA and employees for 2019-2024; SIC code;
                         incorporation date; registered number.
+    FAME_export_family.xlsx  Comparison group (Section 3.3.4): the same search
+                        with step 5 set to one or more named individuals or
+                        families. Returns 9,542 companies.
 
 OUTPUT
     analytical_sample.csv   Cleaned dataset, n = 337
-    table_4_1 ... 4_4       Descriptives, model performance, OLS, robustness
-    fig4_1 ... fig4_4.png   Figures as reported in Chapter 4
+    Tables 3.1, 4.1-4.5     Printed: attrition, descriptives, performance, OLS
+                            and robustness, plus the Section 4.5, 4.7 and 4.9
+                            analyses
+    fig4_1 ... fig4_5.png   Figures as reported in Chapter 4
 
 DEPENDENCIES
     python 3.12  pandas 2.x  numpy  scikit-learn 1.8  xgboost 3.4
@@ -819,6 +824,7 @@ def main() -> None:
     print("  fig4_2.png  Feature importance")
     print("  fig4_3.png  Mean reversion in earnings")
     print("  fig4_4.png  SHAP value distribution")
+    print("  fig4_5.png  Partial dependence on pre-period EBITDA growth")
 
 
 if __name__ == "__main__":

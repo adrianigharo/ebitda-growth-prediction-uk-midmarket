@@ -51,7 +51,7 @@ pip install pandas numpy scikit-learn xgboost shap statsmodels scipy matplotlib 
 python Appendix_B_Analysis_Pipeline.py
 ```
 
-`FAME_export.xlsx` must sit in the same directory. The script writes `analytical_sample.csv` and the four figures, and prints every table reported in Chapter 4, including the robustness checks in Table 4.5. A full run takes roughly fifteen minutes on a standard laptop, most of it in the nested tuning. The notebook contains the same analysis, with the robustness checks in its Section 9.
+Both FAME exports must sit in the same directory. The script writes `analytical_sample.csv` and the five figures, and prints every table reported in Chapter 4, including the robustness checks in Table 4.5. A full run takes roughly fifteen minutes on a standard laptop, most of it in the nested tuning. The notebook contains the same analysis, with the robustness checks in its Section 9 and the family comparison in Section 11.
 
 Tested on Python 3.12 with scikit-learn 1.8, xgboost 3.4 and shap 0.52.
 
