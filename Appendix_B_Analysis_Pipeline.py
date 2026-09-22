@@ -26,7 +26,7 @@ INPUT
                         incorporation date; registered number.
 
 OUTPUT
-    analytical_sample.csv   Cleaned dataset, n = 341
+    analytical_sample.csv   Cleaned dataset, n = 337
     table_4_1 ... 4_4       Descriptives, model performance, OLS, robustness
     fig4_1 ... fig4_4.png   Figures as reported in Chapter 4
 
@@ -53,7 +53,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LassoCV, LinearRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import KFold, cross_val_predict
+from sklearn.model_selection import GridSearchCV, KFold, cross_val_predict
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBRegressor
@@ -63,6 +63,7 @@ warnings.filterwarnings("ignore")
 # ------------------------------------------------------------------ CONSTANTS
 
 SOURCE_FILE   = "FAME_export.xlsx"
+FAMILY_FILE   = "FAME_export_family.xlsx"   # comparison group (Section 3.3.4)
 RANDOM_STATE  = 42
 N_SEEDS       = 20            # repeated CV fold assignments
 BASELINE_YEAR = 2022          # T: predictors measured at or before this year
@@ -279,7 +280,15 @@ def build_features(df: pd.DataFrame, pre_year: int = PRE_YEAR) -> pd.DataFrame:
     for c in FEATURES:
         d[c] = d[c].clip(*d[c].quantile(WINSOR_PREDICTORS))
 
-    # Exclude implausible margin swings (filing errors, not business outcomes).
+    # Zero headcounts (present in the family comparison group, absent from the
+    # PE sample) make log employees and revenue per employee infinite; treat
+    # them as missing so they are imputed like any other gap.
+    d[FEATURES] = d[FEATURES].replace([np.inf, -np.inf], np.nan)
+
+    # Step 8: keep only companies with a valid secondary outcome. Margin change
+    # is uncomputable where 2024 turnover is missing, and implausible where it
+    # moves by 50pp or more (a restatement, not a business outcome). Holding
+    # both outcomes on a common sample keeps them directly comparable.
     return d[d["y_margin_pp"].abs() < 50]
 
 
@@ -301,7 +310,7 @@ def make_pipeline(model, scale: bool = False) -> Pipeline:
 def model_specifications() -> dict:
     """Four models: two linear, two ensemble.
 
-    Hyperparameters are set conservatively given n = 341. Shallow trees and
+    Hyperparameters are set conservatively given n = 337. Shallow trees and
     a low learning rate for XGBoost, and a minimum leaf size of eight for the
     random forest, constrain model complexity relative to sample size.
     """
@@ -324,9 +333,9 @@ def evaluate_models(X: pd.DataFrame, y: pd.Series,
     """Cross-validated performance averaged over repeated fold assignments.
 
     A single five-fold split gives an estimate that depends materially on how
-    observations happen to fall across folds. With n = 335 the variation is
+    observations happen to fall across folds. With n = 337 the variation is
     large enough to change conclusions: in this sample the random forest
-    ranges from 0.049 to 0.167 across seeds. Performance is therefore
+    ranges from 0.073 to 0.164 across seeds. Performance is therefore
     reported as the mean and standard deviation over N_SEEDS repetitions,
     each with a different fold assignment.
 
@@ -414,6 +423,178 @@ def robustness_pre_period(raw: pd.DataFrame) -> pd.DataFrame:
                          "rho": round(rho, 3), "p": round(p, 3)})
     return pd.DataFrame(rows)
 
+
+
+# ------------------------------------------------ ROBUSTNESS (Section 4.6)
+
+def fold_mse_differences(model_a, model_b, X, y, n_seeds=N_SEEDS):
+    """Per-fold MSE(model_a) - MSE(model_b) on identical splits.
+
+    model_a and model_b are factories returning fresh pipelines. Passing
+    None for model_a uses the training-fold mean as a naive benchmark.
+    """
+    diffs = []
+    for seed in range(n_seeds):
+        for tr, te in KFold(5, shuffle=True, random_state=seed).split(X):
+            yb = model_b().fit(X.iloc[tr], y.iloc[tr]).predict(X.iloc[te])
+            ya = (np.full(len(te), y.iloc[tr].mean()) if model_a is None
+                  else model_a().fit(X.iloc[tr], y.iloc[tr]).predict(X.iloc[te]))
+            diffs.append(mean_squared_error(y.iloc[te], ya)
+                         - mean_squared_error(y.iloc[te], yb))
+    return np.array(diffs)
+
+
+def corrected_resampled_t(diffs, k=5, n_seeds=N_SEEDS, test_train_ratio=0.25):
+    """Nadeau and Bengio (2003) corrected resampled t-test.
+
+    Repeated k-fold assignments reuse the same observations, so fold-level
+    results are not independent. The correction inflates the variance by
+    the test/train ratio; a conventional t-test ignores this and overstates
+    confidence. Returns (t, p) for the corrected and conventional tests.
+    """
+    m, v = diffs.mean(), diffs.var(ddof=1)
+    t = m / np.sqrt((1 / (k * n_seeds) + test_train_ratio) * v)
+    df = k * n_seeds - 1
+    conventional = stats.ttest_1samp(diffs, 0)
+    return (float(t), float(2 * stats.t.sf(abs(t), df)),
+            float(conventional.statistic), float(conventional.pvalue))
+
+
+def mean_r2(model_factory, X, y, n_seeds=N_SEEDS):
+    """Mean out-of-sample R-squared over repeated fold assignments."""
+    return float(np.mean([
+        r2_score(y, cross_val_predict(model_factory(), X, y,
+                 cv=KFold(5, shuffle=True, random_state=s), n_jobs=1))
+        for s in range(n_seeds)]))
+
+
+def nested_tuning(estimator, grid, X, y, n_seeds=N_SEEDS):
+    """Nested cross-validation: an inner three-fold grid search inside each
+    outer training fold. Returns mean R-squared and the most-chosen settings."""
+    r2s, chosen = [], []
+    for seed in range(n_seeds):
+        pred = np.empty(len(y))
+        for tr, te in KFold(5, shuffle=True, random_state=seed).split(X):
+            gs = GridSearchCV(estimator, grid, scoring="neg_mean_squared_error",
+                              cv=KFold(3, shuffle=True, random_state=seed), n_jobs=-1)
+            gs.fit(X.iloc[tr], y.iloc[tr])
+            pred[te] = gs.predict(X.iloc[te])
+            chosen.append(str(sorted(gs.best_params_.items())))
+        r2s.append(r2_score(y, pred))
+    return float(np.mean(r2s)), pd.Series(chosen).value_counts().head(3)
+
+
+def robustness_checks(sample: pd.DataFrame, d: pd.DataFrame) -> dict:
+    """Significance tests, tuning, one-year horizon and sector (Table 4.5)."""
+    X, y = d[FEATURES], d["y_growth"]
+    ols = lambda: make_pipeline(LinearRegression(), scale=True)
+    rf = lambda: make_pipeline(RandomForestRegressor(
+        n_estimators=500, min_samples_leaf=8, random_state=RANDOM_STATE, n_jobs=-1))
+    out = {}
+
+    # significance: each model against the naive mean, and RF against OLS
+    out["rf_vs_mean"] = corrected_resampled_t(fold_mse_differences(None, rf, X, y))
+    out["ols_vs_mean"] = corrected_resampled_t(fold_mse_differences(None, ols, X, y))
+    out["rf_vs_ols"] = corrected_resampled_t(fold_mse_differences(ols, rf, X, y))
+
+    # hyperparameter tuning by nested cross-validation
+    out["tuned_rf"] = nested_tuning(
+        make_pipeline(RandomForestRegressor(n_estimators=300, random_state=RANDOM_STATE,
+                                            n_jobs=1)),
+        {"model__min_samples_leaf": [4, 8, 16], "model__max_features": ["sqrt", 1.0]}, X, y)
+    out["tuned_xgb"] = nested_tuning(
+        make_pipeline(XGBRegressor(n_estimators=300, subsample=0.8, colsample_bytree=0.8,
+                                   reg_lambda=2, random_state=RANDOM_STATE, n_jobs=1)),
+        {"model__max_depth": [2, 3, 4], "model__learning_rate": [0.03, 0.1]}, X, y)
+
+    # one-year horizon (EBITDA growth 2022 to 2023)
+    s = sample.set_index("Registered number").loc[d["reg_no"]].reset_index()
+    g1 = (s[col(EBITDA, 2023)] - s[col(EBITDA, 2022)]) / s[col(EBITDA, 2022)]
+    keep = g1.notna().values
+    y1 = g1[keep].clip(*g1[keep].quantile(WINSOR)).reset_index(drop=True)
+    X1 = X[keep].reset_index(drop=True)
+    pair = pd.DataFrame({"c": X1["ebitda_cagr_pre"], "y": y1}).dropna()
+    out["one_year"] = dict(rf=mean_r2(rf, X1, y1), ols=mean_r2(ols, X1, y1),
+                           rho=stats.spearmanr(pair["c"], pair["y"]))
+
+    # pooled sector indicators (divisions with ten or more companies)
+    vc = d["sic_div"].value_counts()
+    grp = np.where(d["sic_div"].isin(vc[vc >= 10].index), d["sic_div"], "other")
+    Xs = pd.concat([X, pd.get_dummies(pd.Series(grp, index=d.index), prefix="sic",
+                                      drop_first=True).astype(float)], axis=1)
+    out["sector"] = dict(rf=mean_r2(rf, Xs, y), ols=mean_r2(ols, Xs, y))
+    return out
+
+
+# ------------------------------------ ASYMMETRY, SCREENING, COMPARISON (4.5, 4.7, 4.9)
+
+def piecewise_slopes(d: pd.DataFrame, var: str, outcome: str) -> dict:
+    """Slope on `var` either side of its median, other predictors as controls."""
+    t = d[d[var].notna()].copy()
+    k = t[var].median()
+    t["below"] = np.minimum(t[var] - k, 0)
+    t["above"] = np.maximum(t[var] - k, 0)
+    ctrl = [f for f in FEATURES if f != var]
+    t[ctrl] = SimpleImputer(strategy="median").fit_transform(t[ctrl])
+    m = sm.OLS(t[outcome], sm.add_constant(t[["below", "above"] + ctrl])).fit(cov_type="HC1")
+    return dict(n=len(t), below=float(m.params["below"]), p_below=float(m.pvalues["below"]),
+                above=float(m.params["above"]), p_above=float(m.pvalues["above"]),
+                p_diff=float(m.t_test("below - above = 0").pvalue))
+
+
+def screening_quintiles(factory, X: pd.DataFrame, y: pd.Series, n_seeds: int = N_SEEDS):
+    """Median realised growth by quintile of out-of-sample prediction."""
+    preds = np.mean([cross_val_predict(factory(), X, y, cv=KFold(5, shuffle=True, random_state=s))
+                     for s in range(n_seeds)], axis=0)
+    q = pd.qcut(preds, 5, labels=["Q1", "Q2", "Q3", "Q4", "Q5"])
+    med = pd.Series(y.values).groupby(q, observed=True).median() * 100
+    return med.round(1), stats.spearmanr(preds, y)
+
+
+def family_comparison(pe_raw: pd.DataFrame, pe: pd.DataFrame) -> dict:
+    """Compare the PE sample with family-owned companies (Section 4.7)."""
+    fam_raw = load_fame_export(FAMILY_FILE)
+    overlap = set(pe_raw["Registered number"].astype(str)) & set(fam_raw["Registered number"].astype(str))
+    fam_raw = fam_raw[~fam_raw["Registered number"].astype(str).isin(overlap)].reset_index(drop=True)
+    fam = build_features(build_sample(fam_raw)[0])
+    out = dict(extract=len(fam_raw) + len(overlap), overlap=len(overlap), n=len(fam))
+
+    out["median_growth"] = (float(pe["y_growth"].median() * 100), float(fam["y_growth"].median() * 100))
+    out["mean_margin_change"] = (float(pe["y_margin_pp"].mean()), float(fam["y_margin_pp"].mean()))
+    out["mw_p"] = (float(stats.mannwhitneyu(pe["y_growth"], fam["y_growth"]).pvalue),
+                   float(stats.mannwhitneyu(pe["y_margin_pp"], fam["y_margin_pp"]).pvalue))
+
+    # pooled regression, outcome winsorised across both groups together
+    pool = pd.concat([pe.assign(pe=1.0), fam.assign(pe=0.0)], ignore_index=True)
+    g = pool["ebitda_growth_raw"]
+    pool["y_joint"] = g.clip(*g.quantile(WINSOR))
+    Z = pool[FEATURES].copy()
+    Z[:] = SimpleImputer(strategy="median").fit_transform(Z)
+    Z = (Z - Z.mean()) / Z.std()
+    Z["pe"] = pool["pe"]
+    Z["pe_x_ebitda_cagr"] = Z["pe"] * Z["ebitda_cagr_pre"]
+    Z["pe_x_rev_cagr"] = Z["pe"] * Z["rev_cagr_pre"]
+    m = sm.OLS(pool["y_joint"], sm.add_constant(Z)).fit(cov_type="HC1")
+    out["pooled"] = {v: (float(m.params[v]), float(m.pvalues[v]))
+                     for v in ["pe", "pe_x_ebitda_cagr", "pe_x_rev_cagr"]}
+    out["rho"] = {name: float(stats.spearmanr(grp["ebitda_cagr_pre"], grp["y_joint"],
+                                              nan_policy="omit").statistic)
+                  for name, grp in [("pe", pool[pool.pe == 1]), ("family", pool[pool.pe == 0])]}
+    out["family_asymmetry"] = piecewise_slopes(fam, "ebitda_cagr_pre", "y_growth")
+
+    # model performance on size-matched family samples, identical settings
+    rf = lambda: make_pipeline(RandomForestRegressor(
+        n_estimators=500, min_samples_leaf=8, random_state=RANDOM_STATE, n_jobs=-1))
+    ols = lambda: make_pipeline(LinearRegression(), scale=True)
+    rng = np.random.default_rng(RANDOM_STATE)
+    rf_r2, ols_r2 = [], []
+    for draw in range(N_SEEDS):
+        sub = fam.sample(n=len(pe), random_state=int(rng.integers(1e9))).reset_index(drop=True)
+        cv = KFold(5, shuffle=True, random_state=draw)
+        rf_r2.append(r2_score(sub["y_growth"], cross_val_predict(rf(), sub[FEATURES], sub["y_growth"], cv=cv)))
+        ols_r2.append(r2_score(sub["y_growth"], cross_val_predict(ols(), sub[FEATURES], sub["y_growth"], cv=cv)))
+    out["matched"] = dict(rf=float(np.mean(rf_r2)), ols=float(np.mean(ols_r2)), rf_all=rf_r2)
+    return out
 
 # ----------------------------------------------------------------- FIGURES
 
@@ -505,6 +686,60 @@ def figure_shap_beeswarm(values, imputed: pd.DataFrame) -> None:
     plt.close()
 
 
+def figure_partial_dependence(X: pd.DataFrame, y: pd.Series) -> None:
+    """Figure 4.5: random forest partial dependence on pre-period EBITDA growth."""
+    from sklearn.inspection import partial_dependence
+    Xi = pd.DataFrame(SimpleImputer(strategy="median").fit_transform(X), columns=X.columns)
+    rf = RandomForestRegressor(n_estimators=500, min_samples_leaf=8,
+                               random_state=RANDOM_STATE, n_jobs=-1).fit(Xi, y)
+    pdp = partial_dependence(rf, Xi, ["ebitda_cagr_pre"], grid_resolution=30)
+    grid, avg = pdp["grid_values"][0] * 100, pdp["average"][0] * 100
+    knot = X["ebitda_cagr_pre"].median() * 100
+    fig, ax = plt.subplots(figsize=(7.5, 3.8))
+    ax.plot(grid, avg, color="#2F5D8C", linewidth=2.2)
+    ax.axvline(knot, color="#888888", linestyle="--", linewidth=1)
+    ax.text(knot, ax.get_ylim()[1], "  median", va="top", fontsize=9, color="#555555")
+    ax.set_xlabel("EBITDA CAGR 2019\u201322 (%)")
+    ax.set_ylabel("Predicted EBITDA growth 2022\u201324 (%)")
+    ax.set_title("Figure 4.5  Partial dependence on pre-period EBITDA growth", loc="left")
+    fig.tight_layout(); fig.savefig("fig4_5.png", dpi=200); plt.close(fig)
+
+
+def report_extensions(raw: pd.DataFrame, d: pd.DataFrame, X: pd.DataFrame) -> None:
+    """Asymmetry (4.5), family comparison (4.7) and screening value (4.9)."""
+    header = lambda t: print(f"\n{'=' * 72}\n{t}\n{'=' * 72}")
+    header("SECTION 4.5  ASYMMETRIC REVERSION")
+    a1 = piecewise_slopes(d, "ebitda_cagr_pre", "y_growth")
+    a2 = piecewise_slopes(d, "margin_2022", "y_margin_pp")
+    print(f"  EBITDA growth: below median {a1['below']:.2f} (p = {a1['p_below']:.4f}), "
+          f"above {a1['above']:.2f} (p = {a1['p_above']:.3f}), difference p = {a1['p_diff']:.5f}")
+    print(f"  margin level:  difference p = {a2['p_diff']:.2f}")
+    c = d["ebitda_cagr_pre"].dropna()
+    print(f"  EBITDA CAGR below -10%: {(c < -0.10).sum()} of {len(c)} ({(c < -0.10).mean()*100:.0f}%)")
+
+    header("SECTION 4.9  SCREENING VALUE (out-of-sample quintiles)")
+    rf_f = lambda: make_pipeline(RandomForestRegressor(
+        n_estimators=500, min_samples_leaf=8, random_state=RANDOM_STATE, n_jobs=-1))
+    ols_f = lambda: make_pipeline(LinearRegression(), scale=True)
+    for name, f in [("Random forest", rf_f), ("OLS", ols_f)]:
+        med, rho = screening_quintiles(f, X, d["y_growth"])
+        print(f"  {name:13s} {med.to_dict()}  rank correlation = {rho.statistic:.3f}")
+
+    header("SECTION 4.7  PRIVATE EQUITY AND FAMILY OWNERSHIP COMPARED")
+    fc = family_comparison(raw, d)
+    print(f"  family extract {fc['extract']}, overlap removed {fc['overlap']}, final n = {fc['n']}")
+    print(f"  median EBITDA growth  PE {fc['median_growth'][0]:.1f}%  family {fc['median_growth'][1]:.1f}%")
+    print(f"  mean margin change    PE {fc['mean_margin_change'][0]:.2f}  family {fc['mean_margin_change'][1]:.2f}")
+    print(f"  Mann-Whitney p: growth {fc['mw_p'][0]:.2g}, margin {fc['mw_p'][1]:.3f}")
+    for v, (b, p) in fc["pooled"].items():
+        print(f"  pooled {v:17s} b = {b:+.3f}  p = {p:.4f}")
+    print(f"  Spearman reversion  PE {fc['rho']['pe']:.3f}  family {fc['rho']['family']:.3f}")
+    print(f"  family asymmetry difference p = {fc['family_asymmetry']['p_diff']:.2g}")
+    print(f"  size-matched family: RF {fc['matched']['rf']:.3f}, OLS {fc['matched']['ols']:.3f}; "
+          f"draws matching PE RF: {sum(r >= 0.134 for r in fc['matched']['rf_all'])} of {N_SEEDS}")
+
+
+
 # --------------------------------------------------------------------- MAIN
 
 def main() -> None:
@@ -515,6 +750,12 @@ def main() -> None:
     sample, attrition = build_sample(raw)
     d = build_features(sample, pre_year=PRE_YEAR)
     d.to_csv("analytical_sample.csv", index=False)
+
+    # Step 8 is applied inside build_features; record it so the printed
+    # table reconciles exactly with Table 3.1 in the dissertation.
+    attrition = pd.concat([attrition, pd.DataFrame([{
+        "Screen": "Margin change computable, within 50pp",
+        "n": len(d), "Change": len(d) - len(sample)}])], ignore_index=True)
 
     header("SAMPLE ATTRITION (Table 3.1)")
     print(attrition.to_string(index=False))
@@ -547,11 +788,33 @@ def main() -> None:
     for feature, value in importance.items():
         print(f"  {FEATURE_LABELS[feature]:26s} {value:.4f}")
 
+    header("TABLE 4.5  ROBUSTNESS OF OUT-OF-SAMPLE PERFORMANCE")
+    rob = robustness_checks(sample, d)
+    for name in ("rf_vs_mean", "ols_vs_mean", "rf_vs_ols"):
+        t, p, t_conv, p_conv = rob[name]
+        print(f"  {name:12s} corrected t = {t:5.2f}, p = {p:.3f}   "
+              f"(conventional p = {p_conv:.5f})")
+    print(f"  tuned random forest R2 = {rob['tuned_rf'][0]:.3f}")
+    print(f"  tuned XGBoost R2       = {rob['tuned_xgb'][0]:.3f}")
+    print(f"  one-year horizon       RF = {rob['one_year']['rf']:.3f}, "
+          f"OLS = {rob['one_year']['ols']:.3f}, "
+          f"rho = {rob['one_year']['rho'].statistic:.3f} "
+          f"(p = {rob['one_year']['rho'].pvalue:.4f})")
+    print(f"  with sector indicators RF = {rob['sector']['rf']:.3f}, "
+          f"OLS = {rob['sector']['ols']:.3f}")
+    d_alt = build_features(sample, pre_year=2020)
+    perf_alt = evaluate_models(d_alt[FEATURES], d_alt["y_growth"]).set_index("Model")
+    print(f"  2020 base              RF = {perf_alt.loc['Random forest', 'R2 mean']:.3f}, "
+          f"OLS = {perf_alt.loc['OLS', 'R2 mean']:.3f}")
+
+    report_extensions(raw, d, X)
+
     header("FIGURES")
     figure_model_performance(evaluate_models(X, d["y_growth"]))
     figure_shap_importance(importance)
     figure_mean_reversion(d)
     figure_shap_beeswarm(values, imputed)
+    figure_partial_dependence(X, d["y_growth"])
     print("  fig4_1.png  Out-of-sample predictive performance")
     print("  fig4_2.png  Feature importance")
     print("  fig4_3.png  Mean reversion in earnings")
