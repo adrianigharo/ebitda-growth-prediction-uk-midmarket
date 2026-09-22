@@ -38,7 +38,7 @@ Roughly seven-eighths of the variation remains unexplained by data available in 
 |---|---|
 | `Appendix_A_Analysis_Notebook.ipynb` | The full analysis with outputs and figures rendered inline. GitHub displays this directly—no download needed. |
 | `Appendix_B_Analysis_Pipeline.py` | The same analysis as a documented module, structured for reproducibility. |
-| `FAME_export.xlsx` | Raw extract from FAME (Bureau van Dijk), retrieved 11 September 2026. 564 companies. The `Search summary` sheet records the search criteria. |
+| `FAME_export.xlsx` | Raw extract from FAME (Bureau van Dijk). 564 companies. The `Search summary` sheet records the search criteria, FAME data update and export date. |
 | `analytical_sample.csv` | Cleaned analytical sample of 337 companies, produced by the pipeline. |
 | `FAME_export_family.xlsx` | Comparison group: 9,542 family-owned companies from the same FAME search, with family ownership in place of private equity. |
 

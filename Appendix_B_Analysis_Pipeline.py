@@ -14,7 +14,7 @@ PURPOSE
 
 INPUT
     FAME_export.xlsx    Companies House financial data via FAME (Bureau van
-                        Dijk), retrieved 11 September 2026. Search criteria:
+                        Dijk), its Search summary sheet records the data update. Search criteria:
                           1. Active companies, not in receivership or dormant
                           2. England, Scotland, Wales or Northern Ireland
                           3. Turnover >= GBP 10.2m, 2022
